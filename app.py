@@ -43,7 +43,7 @@ urllib3.disable_warnings()
 AES_KEY = b"Yg&tc%DEuh6%Zc^8"
 AES_IV = b"6oyZDr22E3ychjM%"
 JWT_URL = "https://as-jwt.vercel.app/token"
-TIMEOUT = 8
+TIMEOUT = 5
 
 JWT_TTL_SECONDS = 7 * 60 * 60
 JWT_REFRESH_BEFORE = 20 * 60
@@ -88,7 +88,7 @@ HEADERS_BASE = {
 # ── Shared session (connection pool for speed) ──────────────────────────────
 _session = requests.Session()
 _session.verify = False
-_adapter = requests.adapters.HTTPAdapter(pool_connections=30, pool_maxsize=30, max_retries=0)
+_adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=0)
 _session.mount("https://", _adapter)
 _session.mount("http://", _adapter)
 
@@ -98,7 +98,36 @@ _jwt_cache = {r: {"token": None, "expires_at": 0.0} for r in REGION_CONFIG}
 _uid_region_lock = threading.Lock()
 _uid_region_cache = {}
 
-_pool = ThreadPoolExecutor(max_workers=8)
+_pool = ThreadPoolExecutor(max_workers=12)
+
+# ── Response cache (ultra-fast repeat lookups) ───────────────────────────────
+RESULT_CACHE_TTL = 45  # seconds
+_result_cache = {}
+_result_cache_lock = threading.Lock()
+
+
+def _result_cache_get(uid: str):
+    with _result_cache_lock:
+        entry = _result_cache.get(uid)
+        if not entry:
+            return None
+        if time.time() >= entry["expires_at"]:
+            _result_cache.pop(uid, None)
+            return None
+        return entry["payload"]
+
+
+def _result_cache_set(uid: str, payload: dict):
+    with _result_cache_lock:
+        _result_cache[uid] = {
+            "payload": payload,
+            "expires_at": time.time() + RESULT_CACHE_TTL,
+        }
+        if len(_result_cache) > 5000:
+            items = sorted(_result_cache.items(), key=lambda x: x[1]["expires_at"])
+            for k, _ in items[: max(1, len(items) // 5)]:
+                _result_cache.pop(k, None)
+
 
 app = Flask(__name__)
 
@@ -283,7 +312,7 @@ def format_duration(seconds):
 GARENA_BASE = "https://ff.garena.com"
 GARENA_URL = "https://ff.garena.com/api/antihack/check_banned"
 GARENA_CACHE_TTL = 10 * 60          # result cache per uid (seconds)
-GARENA_MIN_INTERVAL = 0.8           # soft rate limit between calls
+GARENA_MIN_INTERVAL = 0.3           # soft rate limit between calls
 GARENA_SESSION_TTL = 25 * 60        # refresh session cookies every 25 min
 GARENA_MAX_RETRIES = 2
 
@@ -368,8 +397,8 @@ def check_garena_ban(uid: str, retry_count=0):
         if entry and now < entry["expires_at"]:
             return entry["data"]
         wait = GARENA_MIN_INTERVAL - (now - _garena_last_call)
-        if wait > 0:
-            time.sleep(wait)
+        if wait > 0.05:
+            time.sleep(min(wait, 0.15))
         _garena_last_call = time.time()
 
     session = get_garena_session(force_refresh=(retry_count > 0))
@@ -571,12 +600,17 @@ def detect_region(uid: str):
         return False
 
     futs = [_pool.submit(_probe, r) for r in REGION_ORDER]
-    for f in as_completed(futs, timeout=TIMEOUT + 2):
-        try:
-            if f.result() and result["region"]:
-                break
-        except Exception:
-            continue
+    try:
+        for f in as_completed(futs, timeout=TIMEOUT + 1):
+            try:
+                if f.result() and result["region"]:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    for f in futs:
+        f.cancel()
 
     region = result["region"] or "bd"
     info = result["info"]
@@ -586,7 +620,7 @@ def detect_region(uid: str):
     return region, info
 
 
-def fetch_ban_info(uid: str, region=None):
+def fetch_ban_info(uid: str, region=None, use_garena=True):
     t0 = time.time()
 
     if region:
@@ -640,7 +674,8 @@ def fetch_ban_info(uid: str, region=None):
             data["time_remaining"] = "expired"
 
     # Garena fallback only when BriefInfo has no ban block (old bans etc.)
-    data = apply_garena_fallback(data, uid)
+    if use_garena:
+        data = apply_garena_fallback(data, uid)
 
     return {
         "success": True,
@@ -734,6 +769,8 @@ def jwt_token():
 def bancheck():
     uid = request.args.get("uid", "").strip()
     region_arg = request.args.get("region", "").strip().lower() or None
+    nocache = request.args.get("nocache", "").strip() in ("1", "true", "yes")
+    no_garena = request.args.get("garena", "1").strip() in ("0", "false", "no")
 
     if not uid:
         return jsonify({"success": False, "uid": "", "data": None, "message": "Missing uid"}), 400
@@ -747,11 +784,23 @@ def bancheck():
             "message": f"Unknown region. Use: {', '.join(REGION_CONFIG)}",
         }), 400
 
-    result, error = fetch_ban_info(uid, region_arg)
-    if error:
-        return jsonify({"success": False, "uid": uid, "data": None, "message": error}), 502
+    if not nocache:
+        cached = _result_cache_get(uid)
+        if cached is not None:
+            out = dict(cached)
+            out["ms"] = 0
+            out["cached"] = True
+            return jsonify(out)
 
-    return jsonify(result), 200 if result.get("success") else 502
+    result, error = fetch_ban_info(uid, region_arg, use_garena=not no_garena)
+    if error:
+        return jsonify(result), 502
+    if result and result.get("success") and not nocache:
+        _result_cache_set(uid, result)
+    if result is not None:
+        result = dict(result)
+        result["cached"] = False
+    return jsonify(result)
 
 
 @app.route("/", methods=["GET"])
@@ -760,9 +809,11 @@ def index():
         "service": "Free Fire Ban Check API",
         "version": "4.0",
         "endpoints": {
-            "/bancheck": "GET ?uid=UID [&region=bd|ind|us]",
+            "/bancheck": "GET ?uid=UID [&region=bd|ind|us] [&nocache=1] [&garena=0]",
             "/jwt-token": "GET [?region=bd] — force refresh JWT cache",
             "/jwt-status": "GET",
+            "/garena-status": "GET",
+            "/garena-refresh": "GET/POST",
             "/health": "GET",
         },
         "ban_detection": {
@@ -778,11 +829,16 @@ def index():
 def _warm_cache():
     try:
         refresh_all_jwts()
+        # warm TCP/TLS to game hosts
+        for region, cfg in REGION_CONFIG.items():
+            try:
+                _session.head(cfg["base_url"], timeout=3)
+            except Exception:
+                pass
+        get_garena_session(force_refresh=True)
     except Exception:
         pass
 
-
-threading.Thread(target=_warm_cache, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8001, debug=False, threaded=True)
