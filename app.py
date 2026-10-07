@@ -500,14 +500,14 @@ def parse_brief_info(raw: bytes) -> dict:
         "nickname": None,
         "level": None,
         "region": None,
-        "last_login_ts": None,
-        "create_at_ts": None,
-        "is_banned": False,
-        "ban_type": None,
+        "last_login_ts": 0,
+        "create_at_ts": 0,
+        "is_banned": 0,
+        "ban_type": 0,
         "ban_status": "NOT_BANNED",
-        "ban_ts": None,
-        "ban_duration_sec": None,
-        "ban_end_ts": None,
+        "ban_ts": 0,
+        "ban_duration_sec": 0,
+        "ban_end_ts": 0,
     }
 
     msg = brief_pb.BriefInfoResponse()
@@ -524,8 +524,8 @@ def parse_brief_info(raw: bytes) -> dict:
     info["nickname"] = p.nickname or None
     info["level"] = p.level if p.level else None
     info["region"] = p.region or None
-    info["last_login_ts"] = p.last_login if p.last_login else None
-    info["create_at_ts"] = p.create_at if p.create_at else None
+    info["last_login_ts"] = p.last_login if p.last_login else 0
+    info["create_at_ts"] = p.create_at if p.create_at else 0
 
     # ONLY reliable ban source: field 81 (BanInfo)
     #  - 81.4 present → banned
@@ -536,7 +536,7 @@ def parse_brief_info(raw: bytes) -> dict:
     if p.HasField("ban_info"):
         ban = p.ban_info
         info["is_banned"] = True
-        info["ban_ts"] = ban.ban_start if ban.ban_start else None
+        info["ban_ts"] = ban.ban_start if ban.ban_start else 0
         if ban.ban_duration and ban.ban_duration > 0:
             info["ban_type"] = "temporary"
             info["ban_status"] = "TEMP_BANNED"
