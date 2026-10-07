@@ -481,14 +481,14 @@ def apply_garena_fallback(data: dict, uid: str) -> dict:
         data["ban_type"] = "permanent"
         data["ban_status"] = "PERMANENT_BANNED"
     # Garena has no ban_start / ban_end
-    data["ban_start"] = None
-    data["ban_start_ts"] = None
-    data["ban_end"] = None
-    data["ban_end_ts"] = None
-    data["ban_duration"] = f"{period} period(s)" if period else None
-    data["ban_duration_sec"] = None
-    data["time_remaining"] = None
-    data["time_remaining_sec"] = None
+    data["ban_start"] = 0
+    data["ban_start_ts"] = 0
+    data["ban_end"] = 0
+    data["ban_end_ts"] = 0
+    data["ban_duration"] = f"{period} period(s)" if period else 0
+    data["ban_duration_sec"] = 0
+    data["time_remaining"] = 0
+    data["time_remaining_sec"] = 0
     data["garena_period"] = period
     return data
 
