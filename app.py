@@ -58,8 +58,8 @@ REGION_CONFIG = {
     },
     "ind": {
         "base_url": "https://client.ind.freefiremobile.com",
-        "uid": "8000503869",
-        "password": "1FA923ACA442E5944D91B9071819BEAB3BABF4B45F49B50EABAD0170450FD38E",
+        "uid": "8284031405",
+        "password": "SS_KILL_CODE_LjpIzb4O",
     },
     "us": {
         "base_url": "https://client.us.freefiremobile.com",
